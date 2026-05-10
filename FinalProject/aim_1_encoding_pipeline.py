@@ -56,8 +56,10 @@ class Config:
         "sub-p02", "sub-p06", "sub-p07", "sub-p10"
     )
 
-    # Task names (BIDS task labels — confirm against dataset README)
-    natural_image_task: str = "sixcatlocdiffisidur"
+    # Task names (BIDS task labels — confirmed on disk via Milestone 0)
+    # Brands 2024 natural-image task: two variants differing in ISI sequence
+    natural_image_task: str = "sixcatlocdiffisi"       # primary ISI-varying task
+    natural_image_task_temporal: str = "sixcatloctemporal"  # temporal variant
     spatiotemporal_task: str = "spatialpattern"
 
     # Trial epoching (Brands 2024 used [-0.1, 1.2] s relative to onset)

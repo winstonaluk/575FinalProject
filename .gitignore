@@ -1,0 +1,23 @@
+# 1. Ignore everything in the root directory
+/*
+
+# 2. Re-include the FinalProject folder itself
+!/FinalProject/
+
+# 3. Inside FinalProject, ignore all its sub-contents by default
+/FinalProject/*
+
+# 4. Specifically allow (un-ignore) the directories you want
+!/FinalProject/notebooks/
+!/FinalProject/results/
+!/FinalProject/src/
+!/FinalProject/tests/
+!/FinalProject/aim_1_encoding_pipeline.py
+!/FinalProject/CLAUDE.md
+
+# 5. Global Ignores (Always ignore these, even in allowed folders)
+**/.ipynb_checkpoints/
+**/.claude/
+**/__pycache__/
+*.pyc
+.DS_Store
