@@ -90,15 +90,36 @@ The analysis we're *not* doing in this round, but is a natural next step for the
 
 ## 4. Implementation plan
 
-### Pipeline structure (current code in `aim1_encoding_pipeline.py`)
+### Pipeline structure
 
-Five stages, all in one module for now:
+Two modules now split the work:
 
-1. **Data loading** — per-subject electrode metadata + Wang atlas probabilities; load broadband HDF5 derivatives; parse BIDS events.tsv per run.
+- **`aim_4_1_encoding_pipeline.py`** (root) — data loading, trial extraction, ridge regression. Provides `Config`, `load_broadband_run`, `load_events`, `epoch_trials`, `fit_encoding_model`. Broadband files are **BrainVision format** (`.vhdr/.eeg/.vmrk`) read via MNE; path pattern is `ECoGBroadband/sub-{p13}/ses-nyuecog01/ieeg/sub-{p13}_ses-nyuecog01_task-{task}_run-{run:02d}_desc-broadband_ieeg.vhdr`. Session label `ses-nyuecog01` applies to both p13 and p14.
+- **`src/cnn_features.py`** — CNN feature extraction for all 7 architectures; `StimulusBank` and `FeatureCache` dataclasses; `build_and_cache_features`, `load_feature_cache`. Supersedes the CNN extraction stub in the pipeline module.
+
+Five pipeline stages:
+
+1. **Data loading** — per-subject electrode metadata + Wang atlas probabilities; load BrainVision broadband via MNE; parse BIDS events.tsv per run.
 2. **Trial extraction** — epoch [-0.1, 1.2] s relative to stimulus onset; baseline-correct to fractional signal change using [-0.1, 0.0] s; reject trials with peri-stimulus peak > 3 SD outside the [0.05, 0.85] s window (Groen 2022 criterion).
-3. **CNN feature extraction** — forward-pass each unique stimulus once through pretrained ResNet50 (default; AlexNet and VGG16 as robustness checks); global-average-pool spatial dims of conv layers; cache to disk.
+3. **CNN feature extraction** — forward-pass each unique stimulus once through 7 pretrained architectures (see § 4a); global-average-pool spatial dims of conv layers; cache to disk per arch.
 4. **Per-electrode ridge regression** — RidgeCV with 12-fold leave-stimulus-out outer CV; alphas in `np.logspace(-2, 8, 21)`; standardize features within fold to avoid leakage; pooled cv-R² across folds (not averaged).
 5. **Layer-of-best-fit + hierarchy gradient** — Kruskal-Wallis across V1-V3 / VOTC / LOTC; pairwise Mann-Whitney with Bonferroni for adjacent groups.
+
+### 4a. CNN architecture registry (all extracted and cached)
+
+Seven architectures are registered in `src/cnn_features.py` and have cached feature files under `results/cnn_features_{arch}.pkl`. All produce `(288, n_features)` per layer.
+
+| Arch | Layers cached | Notes |
+|---|---|---|
+| `resnet50` | conv1, layer1–4, avgpool | 6 layers; primary model for Aim 1 |
+| `alexnet` | features.0,3,6,8,10, classifier.4 | 6 layers; Kuzovkin 2018 baseline |
+| `vgg16` | features.3,8,15,22,29, classifier.3 | 6 layers; robustness check |
+| `convnext_tiny` | features.1,3,5,7, classifier.2 | 5 layers; modern feedforward |
+| `densenet121` | denseblock1–4, classifier | 5 layers; dense skip connections |
+| `swin_t` | features.1,3,5,7, head | 5 layers; hierarchical vision transformer; outputs are channels-last, permuted before GAP |
+| `cornet_s` | V1, V2×2, V4×4, IT×2 | 9 keys (recurrent steps stored separately as `area@step_N`); biologically motivated |
+
+**CORnet-S notes:** V2 fires 2 times per forward pass, V4 4 times, IT 2 times; hooks track each recurrent step. Model is wrapped in `DataParallel` — always unwrap before registering hooks (`net = net.module if hasattr(net, "module") else net`). Load with `map_location="cpu"` to avoid CUDA deserialization errors on CPU-only machines.
 
 ### Phases of execution
 
@@ -139,41 +160,47 @@ Five stages, all in one module for now:
 - **Don't try to interpret encoding-model weights as receptive fields.** Spatial resolution doesn't support it. See § 3 above.
 - **Don't reach for a GPU.** Ridge is closed-form. Adding GPU code is a complexity tax without a speed win.
 
-### Repository layout (suggested)
+### Repository layout (current)
 
 ```
 .
-├── CLAUDE.md                    # this file
-├── aim1_encoding_pipeline.py    # current scaffold; will likely split as it grows
-├── methods_section.docx         # report methods draft
-├── data/                        # NOT committed; ds004194 download lives here
-├── results/                     # cv-R² CSVs, layer-of-best-fit per electrode, plots
-├── notebooks/                   # exploration and figure generation
-└── tests/                       # pipeline-validation diagnostics against Groen 2022
+├── CLAUDE.md                          # this file
+├── aim_4_1_encoding_pipeline.py       # data loading, trial extraction, ridge regression
+├── data/                              # NOT committed; ds004194 download lives here
+├── notebooks/
+│   ├── milestone_04_cnn_features.ipynb        # CNN feature exploration, PCA, Fisher ratio
+│   ├── milestone_04b_rerun_extraction.ipynb   # idempotent per-arch extraction runner
+│   └── milestone_04c_separability_analysis.ipynb  # RSA, Isomap geodesic, scrambled check
+├── results/
+│   ├── cache/
+│   │   └── stimulus_bank.pkl          # 288-image StimulusBank (rebuilt from .mat files)
+│   ├── cnn_features_{arch}.pkl        # FeatureCache per arch (7 files)
+│   └── milestone_04c_*.{csv,png}      # analysis outputs
+├── src/
+│   └── cnn_features.py                # CNN extraction: StimulusBank, FeatureCache, 7 arch registry
+└── tests/                             # pipeline-validation diagnostics against Groen 2022
 ```
-
-When the pipeline grows beyond a single file, split as: `data_loading.py`, `preprocessing.py`, `cnn_features.py`, `encoding.py`, `analysis.py`, `viz.py`. Keep the `Config` dataclass in a single `config.py`.
 
 ### Dependencies
 
-Python 3.11+; numpy, scipy, scikit-learn, pandas, h5py, joblib, mne (BIDS loading), torch + torchvision (CNN feature extraction), matplotlib + seaborn for figures.
+Python 3.11+; numpy, scipy, scikit-learn, pandas, h5py, joblib, mne (BrainVision loading), torch + torchvision (CNN feature extraction), tqdm (progress bars), cornet (`pip install cornet`, for CORnet-S), matplotlib + seaborn for figures.
 
 ---
 
 ## 6. Open TODOs from the scaffold
 
-Things deliberately left as TODOs in `aim1_encoding_pipeline.py` because they depend on the actual filesystem layout once the data is downloaded:
-
 - [x] Verify exact BIDS task labels — **confirmed (Milestone 0)**:
   - Validation (Groen): `task-spatialpattern`, `task-temporalpattern`
   - Primary (Brands): `task-sixcatlocdiffisi`, `task-sixcatloctemporal` (NOT `task-sixcatlocdiffisidur`)
   - Also present in dataset: `task-soc`, `task-sixcatlocisidiff` (not used in our pipeline)
-- [x] Confirm path patterns under `/derivatives/ECoGBroadband/sub-*/` — **confirmed (Milestone 0)**:
-  - Metadata (channels.tsv, events.tsv, ieeg.json) are real files and accessible.
-  - Timeseries (.eeg, .vhdr, .vmrk) are datalad symlinks; need `datalad get derivatives/ECoGBroadband/sub-p{XX}/`.
+- [x] Confirm path patterns under `/derivatives/ECoGBroadband/sub-*/` — **confirmed and corrected (Milestone 4b/c)**:
+  - Files are **BrainVision format** (`.vhdr/.eeg/.vmrk`), not HDF5.
+  - Full path: `ECoGBroadband/sub-{p13}/ses-nyuecog01/ieeg/sub-{p13}_ses-nyuecog01_task-{task}_run-{run:02d}_desc-broadband_ieeg.vhdr`
+  - Session label `ses-nyuecog01` appears in **both** the subdirectory and the filename.
+  - Load via `mne.io.read_raw_brainvision(fp, preload=True, verbose=False)` → `.get_data()` returns `(n_ch, n_samples)`.
 - [ ] Confirm schema of the atlas-matches JSON sidecar from `/derivatives/freesurfer/sub-*/`. The Winawer-lab pipeline writes per-electrode probability dictionaries; check the actual key names.
 - [x] Replicate the irisgroen/temporalECoG `ecog_selectElectrodes.m` reliability-based electrode selection (split-half R² > 0.22) in Python for Phase A validation. **Done in Milestone 3.**
-- [ ] Pull stimulus images from the BAIR_stimuli GitHub repo (Winawer lab).
+- [x] Pull stimulus images — **done (Milestone 4)**. 288 unique images loaded from raw `.mat` files via `src/cnn_features.py:load_brands_stimulus_bank()`. Category assignment uses `cat[ti-1]` (per-image, not per-trial). Stimulus bank cached at `results/cache/stimulus_bank.pkl`.
 
 ---
 
@@ -253,30 +280,38 @@ Smallest meaningful pipeline-validation test against a known answer.
 **Deliverable:** your version of Groen 2022 Figure 4B (left panel — summed broadband vs. contrast).
 **Exit criterion:** data points fall within/near published 68% CIs. **If this fails, do not proceed. Debug atlas-probability bootstrapping, electrode reliability filtering (split-half R² > 0.22), epoch selection, and event-condition extraction here on a known answer.**
 
-### Milestone 4 — Stimulus loading and CNN feature extraction (half a day)
+### Milestone 4 — Stimulus loading and CNN feature extraction ✅ COMPLETE
 
-Independent of neural data; get the CNN side working in isolation.
+Three notebooks implement this milestone:
 
-- Pull Brands stimulus set from BAIR_stimuli GitHub repo.
-- Verify all 288 unique images load; spot-check across categories.
-- Set up ResNet50 forward-pass with hooks on conv1, layer1-4, avgpool.
-- Run extraction on all 288 images; cache to disk.
-- Sanity-check cache: shapes are `(288, n_channels)` per layer; PCA the feature matrix and verify category separation (faces cluster, scrambled diffuse).
+- **`milestone_04_cnn_features.ipynb`** — PCA plots, Fisher discriminant ratio, and separability visualizations for all 7 archs.
+- **`milestone_04b_rerun_extraction.ipynb`** — idempotent extraction runner; rebuilds `stimulus_bank.pkl` and all 7 `cnn_features_{arch}.pkl` caches. Run this if caches are stale.
+- **`milestone_04c_separability_analysis.ipynb`** — three deeper analyses: (1) RSA between ECoG RDMs and CNN layer RDMs across 44 sliding 25ms windows [−100, +1000ms]; (2) Isomap geodesic Fisher ratio vs Euclidean Fisher ratio per arch/layer; (3) permutation tests for scrambled vs natural gamma in early/mid/late windows.
 
-**Deliverable:** cached pickle of CNN features + per-layer PCA plot showing category structure.
-**Exit criterion:** features look sensible; cache loads in <5 seconds.
+**Key finding from Milestone 4c:** Feedforward architectures (ResNet50, AlexNet, VGG16) show Fisher separability peaking at layer depth 1 then collapsing. CORnet-S maintains separability across its recurrent timesteps. The RSA heatmap shows when ECoG representational geometry aligns with CNN geometry — use this to select the response window for Milestone 5.
+
+**Key bug fixed:** `stimulus.cat` in the `.mat` files is a **per-image** array, not per-trial. Index it as `cat[ti-1]` where `ti` is the trial's `trialindex`. The incorrect `zip(trialindex, cat)` pattern assigns the wrong categories.
+
+**Exit criterion:** all 7 `cnn_features_{arch}.pkl` files present, each with 288 images and correct layer count. Cache loads in <5 seconds.
 
 ### **Milestone 5 — End-to-end encoding model on one electrode (half a day)**
 
 Highest-value milestone. Most pipeline bugs surface here on a tractable scale.
 
-- Load p14, extract trials, get broadband responses for one V1 electrode.
-- Match each trial to its stimulus's CNN feature vector.
-- Fit RidgeCV with 12-fold leave-stimulus-out.
-- Compute pooled cv-R² across folds.
-- Plot predicted vs. actual response, layer-by-layer.
+**Context from Milestone 4c:** The RSA heatmap showed when ECoG representational geometry aligns with CNN geometry. Use that result to inform the response window for the scalar broadband summary. Default: mean broadband over [0.05, 0.55] s (`cfg.response_window`); adjust based on the RSA peak window if results are weak.
 
-**Deliverable:** per-layer cv-R² for one electrode + scatter plot for best layer.
+**Steps:**
+- Load p13 or p14 epoch cache from `results/cache/milestone_04c_epochs_{sub}.pkl` (built by milestone_04c cell 5) to avoid re-loading broadband. Shape is `(288, n_vis_ch, 665)`.
+- Select one visual electrode (prefer a V1-V3 electrode from the Wang atlas CSV).
+- Collapse the time axis to a scalar per image: `mean(epochs[img_id, ch, t_mask])` over the response window → `y` of shape `(288,)`.
+- Match each image to its CNN feature vector from a loaded `FeatureCache` (e.g. ResNet50).
+- Fit `RidgeCV` with 12-fold leave-stimulus-out CV (see `aim_4_1_encoding_pipeline.fit_encoding_model`).
+- Compute pooled cv-R² across folds.
+- Plot predicted vs. actual response and per-layer cv-R² bar chart.
+
+**Multi-arch extension (do after the single-electrode sanity check passes):** loop over all 7 architectures and all layers; build a (n_layers_total × 1) cv-R² profile for one electrode. This is a cheap precursor to the full cohort analysis.
+
+**Deliverable:** per-layer cv-R² for one electrode across all 7 archs + scatter plot for best layer.
 **Exit criterion:** cv-R² > 0 for at least one CNN layer. If negative everywhere, debug stimulus-trial alignment or response extraction here, where the full computation runs in seconds.
 
 ### Milestone 6 — Full primary cohort analysis (1 day)
@@ -293,13 +328,13 @@ Scale up to all electrodes.
 
 ### Milestone 7 — Robustness checks (half a day)
 
-Verify the result isn't an architecture artifact before writing up.
+Architecture breadth was substantially addressed in Milestone 4 (7 archs extracted and compared). Remaining robustness checks:
 
-- Repeat with AlexNet (5 conv + 3 FC) and VGG16.
-- Repeat with alternative response-window summary (AUC instead of mean) to rule out window artifacts.
-- Confirm V1-V3 → VOTC → LOTC gradient direction is consistent across at least 2 of 3 architectures.
+- Repeat hierarchy gradient with all 7 architectures (Milestone 4c already showed which layers have category structure; now test predictive power per area).
+- Test alternative response-window summaries (AUC instead of mean; peak instead of mean) to rule out window artifacts. Use the RSA peak window from Milestone 4c as the biologically-motivated alternative.
+- Confirm V1-V3 → VOTC → LOTC gradient direction is consistent across at least 3 of 7 architectures, and specifically across the biologically-motivated (CORnet-S) vs engineered (ResNet50, VGG16) archs.
 
-**Deliverable:** robustness table showing hierarchy direction across architectures.
+**Deliverable:** robustness table showing hierarchy direction and peak cv-R² across all 7 architectures.
 **Exit criterion:** consistent gradient across architectures, OR honest negative result that gets written up as such.
 
 ### Milestone 8 — Figure generation and report writing (1-2 days)
