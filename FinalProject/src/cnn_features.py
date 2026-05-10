@@ -251,7 +251,7 @@ def _cnn_configs():
             },
         ),
         "cornet_s": (
-            lambda: __import__("cornet").cornet_s(pretrained=True),
+            lambda: __import__("cornet").cornet_s(pretrained=True, map_location="cpu"),
             # output of each cortical area; V4 and IT are recurrent
             ("V1.output", "V2.output", "V4.output", "IT.output"),
             {
@@ -314,6 +314,7 @@ def extract_cnn_features(
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     net = factory().eval().to(device)
+    net = net.module if hasattr(net, "module") else net   # unwrap DataParallel
 
     activations: dict[str, list[np.ndarray]] = {}
     call_counter: dict[str, int] = {ln: 0 for ln in layers}
