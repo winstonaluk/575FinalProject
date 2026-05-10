@@ -42,9 +42,12 @@ from joblib import Parallel, delayed
 # Configuration
 # ---------------------------------------------------------------------
 
+SESSION = "ses-nyuecog01"   # BIDS session label for both p13 and p14
+
+
 @dataclass
 class Config:
-    bids_root: Path = Path("/data/ds004194")           # OpenNeuro download root
+    bids_root: Path = Path("/Users/winstonluk/Documents/NEURON/FinalProject/data/ds004194")
     derivatives: Path = field(init=False)
     broadband_dir: Path = field(init=False)
     brands_dir: Path = field(init=False)
@@ -153,18 +156,22 @@ def load_broadband_run(
 ) -> tuple[np.ndarray, dict]:
     """Load common-average-referenced broadband-gamma envelope for one run.
 
+    Files are BrainVision format (.vhdr/.eeg/.vmrk) under the BIDS
+    session subdirectory ses-nyuecog01/ieeg/.
+
     Returns:
         bb       — array of shape (n_channels, n_samples)
         info     — dict with channel names, fs, etc.
     """
-    # Path follows BIDS derivatives convention. Filename pattern from
-    # the Winawer ECoG_utils repo: <sub>_<task>_run-<n>_desc-broadband_ieeg.h5
-    pattern = f"{subject}_task-{task}_run-{run:02d}_desc-broadband_ieeg.h5"
-    fp = cfg.broadband_dir / subject / pattern
-    with h5py.File(fp, "r") as f:
-        bb = f["broadband"][:]            # shape (n_ch, n_samples)
-        ch_names = [s.decode() for s in f["channels"][:]]
-        fs = float(f.attrs.get("fs", cfg.fs))
+    import mne
+    ieeg_dir = cfg.broadband_dir / subject / SESSION / "ieeg"
+    fname = (f"{subject}_{SESSION}_task-{task}_run-{run:02d}"
+             f"_desc-broadband_ieeg.vhdr")
+    fp = ieeg_dir / fname
+    raw = mne.io.read_raw_brainvision(str(fp), preload=True, verbose=False)
+    bb = raw.get_data()                   # (n_ch, n_samples)
+    ch_names = raw.ch_names
+    fs = float(raw.info["sfreq"])
     return bb, {"ch_names": ch_names, "fs": fs}
 
 
@@ -173,9 +180,10 @@ def load_events(cfg: Config, subject: str, run: int, task: str) -> pd.DataFrame:
 
     Expected columns: onset, duration, trial_type, stim_file, isi
     """
-    events_tsv = (cfg.bids_root / subject /
-                  f"{subject}_task-{task}_run-{run:02d}_events.tsv")
-    return pd.read_csv(events_tsv, sep="\t")
+    ieeg_dir = cfg.broadband_dir / subject / SESSION / "ieeg"
+    fname = (f"{subject}_{SESSION}_task-{task}_run-{run:02d}"
+             f"_desc-broadband_events.tsv")
+    return pd.read_csv(ieeg_dir / fname, sep="\t")
 
 
 # ---------------------------------------------------------------------
